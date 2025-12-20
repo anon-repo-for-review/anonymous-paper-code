@@ -1,0 +1,395 @@
+package mathematical_relations;
+
+import org.neo4j.graphdb.Node;
+import org.neo4j.graphdb.GraphDatabaseService;
+import org.neo4j.logging.Log;
+import org.neo4j.procedure.*;
+import result_classes.TimeSeriesResult;
+import temporal_joins.AlignedData;
+import temporal_joins.JoinStrategyFactory;
+import temporal_joins.TemporalJoinStrategy;
+import util.TimeSeriesUtil;
+
+import java.time.ZonedDateTime;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+/**
+ * Für jeden nodeB in nodesB: schätzt ein VAR(1) auf einer regulären Zeitgitterbasis
+ * (Schritt = intervalSeconds) im Überlappungszeitraum zwischen nodeA.metricA und nodeB.metricB,
+ * berechnet die IRF (Impulse Response Function) für `steps` Schritte und liefert Node+IRF zurück.
+ */
+public class VARImpulseNodeGroupProcedure {
+
+    @Context
+    public GraphDatabaseService db;
+
+    @Context
+    public Log log;
+
+    public static class IRFNodeResult {
+        public Node node;
+        public List<Double> responseOnA; // Effekt auf A
+        public List<Double> responseOnB; // Effekt auf B
+
+        public IRFNodeResult(Node node, List<Double> responseOnA, List<Double> responseOnB) {
+            this.node = node;
+            this.responseOnA = responseOnA;
+            this.responseOnB = responseOnB;
+        }
+    }
+
+    @Procedure(name = "graphobs.analysis.var_irf_node_group", mode = Mode.READ)
+    @Description("Schätzt VAR(1) für nodeA.metricA und jeden nodeB.metricB auf regularisiertem Gitter (intervalSeconds). " +
+            "Returns per nodeB the IRF (responses of A and B to a unit shock in A).")
+    public Stream<IRFNodeResult> computeVarIrfNodeGroup(
+            @Name("nodeA") Node nodeA,
+            @Name("metricA") String metricA,
+            @Name("nodesB") List<Node> nodesB,
+            @Name("metricB") String metricB,
+            //@Name("intervalSeconds") long intervalSeconds,
+            //@Name("steps") long steps,
+            @Name(value = "params", defaultValue = "{}") Map<String, Object> params
+    ) {
+
+        long intervalSeconds = (long) params.getOrDefault("intervalSeconds", 60L);
+        long steps = (long) params.getOrDefault("steps", 10L);
+
+        /*if (nodeA == null || metricA == null || metricA.isBlank() || nodesB == null || nodesB.isEmpty()
+                || metricB == null || metricB.isBlank()) {
+            log.warn("Invalid input to VAR_IRF_node_group");
+            return Stream.empty();
+        }
+        if (intervalSeconds <= 0) intervalSeconds = 60; // default 60s
+        int hSteps = (int) Math.max(0, steps);
+
+        try {
+            // --- 1) hole und kombiniere alle series für nodeA (wie zuvor) ---
+            List<TimeSeriesResult> seriesA = TimeSeriesUtil.getFilteredTimeSeries(nodeA, metricA, params, db, log)
+                    .collect(Collectors.toList());
+            if (seriesA.isEmpty()) {
+                log.warn("No time series for nodeA " + nodeA.getElementId());
+                return Stream.empty();
+            }
+            Map<Long, Double> combinedA = combineSeriesToMillisMap(seriesA, metricA);
+            if (combinedA.isEmpty()) {
+                log.warn("No usable data for nodeA metric " + metricA);
+                return Stream.empty();
+            }
+
+            List<IRFNodeResult> results = new ArrayList<>();
+
+            // Für jeden nodeB separat
+            for (Node nodeB : nodesB) {
+                try {
+                    List<TimeSeriesResult> seriesB = TimeSeriesUtil.getFilteredTimeSeries(nodeB, metricB, params, db, log)
+                            .collect(Collectors.toList());
+                    if (seriesB.isEmpty()) continue;
+                    Map<Long, Double> combinedB = combineSeriesToMillisMap(seriesB, metricB);
+                    if (combinedB.isEmpty()) continue;
+
+                    // min/max für Overlap
+                    long minA = Collections.min(combinedA.keySet());
+                    long maxA = Collections.max(combinedA.keySet());
+                    long minB = Collections.min(combinedB.keySet());
+                    long maxB = Collections.max(combinedB.keySet());
+
+                    long overlapStart = Math.max(minA, minB);
+                    long overlapEnd = Math.min(maxA, maxB);
+                    if (overlapStart >= overlapEnd) continue;
+
+                    long stepMillis = intervalSeconds * 1000L;
+
+                    // Erzeuge regelmäßiges Gitter innerhalb des Overlaps
+                    List<Long> grid = new ArrayList<>();
+                    long t = overlapStart;
+                    // align t to first grid point >= overlapStart
+                    long alignedStart = overlapStart;
+                    // Optionally align to multiple of step (not necessary, we start at overlapStart)
+                    alignedStart = overlapStart;
+                    for (long tt = alignedStart; tt <= overlapEnd; tt += stepMillis) {
+                        grid.add(tt);
+                        // avoid overflow
+                        if (Long.MAX_VALUE - tt < stepMillis) break;
+                    }
+                    if (grid.size() < 4) continue; // too few points
+
+                    // prepare arrays for interpolation
+                    long[] xsA = combinedA.keySet().stream().sorted().mapToLong(Long::longValue).toArray();
+                    double[] ysA = Arrays.stream(xsA).mapToDouble(xk -> combinedA.get(xk)).toArray();
+
+                    long[] xsB = combinedB.keySet().stream().sorted().mapToLong(Long::longValue).toArray();
+                    double[] ysB = Arrays.stream(xsB).mapToDouble(xk -> combinedB.get(xk)).toArray();
+
+                    // Interpolierte Werte auf dem Gitter
+                    List<Double> alignedA = new ArrayList<>(grid.size());
+                    List<Double> alignedB = new ArrayList<>(grid.size());
+                    for (Long g : grid) {
+                        Double vA = interpolateAt(xsA, ysA, g);
+                        Double vB = interpolateAt(xsB, ysB, g);
+                        if (vA == null || vB == null) continue; // skip if cannot interpolate
+                        alignedA.add(vA);
+                        alignedB.add(vB);
+                    }
+
+                    if (alignedA.size() < 4 || alignedB.size() < 4) continue;
+
+                    // --- Build VAR(1) dataset on regular grid ---
+                    int n = alignedA.size();
+                    int numObs = n - 1; // because lag1
+
+                    double[][] X = new double[numObs][3]; // intercept, y1_lag, y2_lag
+                    double[] Y1 = new double[numObs];
+                    double[] Y2 = new double[numObs];
+
+                    for (int i = 0; i < numObs; i++) {
+                        X[i][0] = 1.0;
+                        X[i][1] = alignedA.get(i);
+                        X[i][2] = alignedB.get(i);
+                        Y1[i] = alignedA.get(i + 1);
+                        Y2[i] = alignedB.get(i + 1);
+                    }*/
+        if (intervalSeconds <= 0) intervalSeconds = 60;
+        int hSteps = (int) Math.max(0, steps);
+
+        try {
+            // --- 1) Daten für Node A abrufen ---
+            List<TimeSeriesResult> seriesA = TimeSeriesUtil.getFilteredTimeSeries(nodeA, metricA, params, db, log)
+                    .collect(Collectors.toList());
+            if (seriesA.isEmpty()) {
+                log.warn("Keine Zeitreihen für nodeA " + nodeA.getElementId());
+                return Stream.empty();
+            }
+
+            // --- 2) Join-Strategie vorbereiten ---
+            TemporalJoinStrategy joinStrategy = JoinStrategyFactory.getStrategy((String) params.getOrDefault("join", "linear"));
+            Map<String, Object> joinParams = new HashMap<>(params);
+            joinParams.put("intervalSeconds", intervalSeconds);
+
+            List<IRFNodeResult> results = new ArrayList<>();
+
+            // --- 3) Iteration über jeden Node B ---
+            for (Node nodeB : nodesB) {
+                try {
+                    List<TimeSeriesResult> seriesB = TimeSeriesUtil.getFilteredTimeSeries(nodeB, metricB, params, db, log)
+                            .collect(Collectors.toList());
+                    if (seriesB.isEmpty()) continue;
+
+                    // =========================================================================
+                    // 4) TEMPORAL JOIN: Die gesamte manuelle Logik wird durch diesen Aufruf ersetzt
+                    // =========================================================================
+                    AlignedData alignedData = joinStrategy.align(seriesA, metricA, seriesB, metricB, joinParams);
+
+                    if (alignedData.size() < 4) continue; // Zu wenige Punkte für VAR(1)
+
+                    // --- 5) VAR(1) auf den ausgerichteten Daten aufbauen ---
+                    int numObs = alignedData.size() - 1;
+                    double[][] X = new double[numObs][3];
+                    double[] Y1 = new double[numObs];
+                    double[] Y2 = new double[numObs];
+
+                    for (int i = 0; i < numObs; i++) {
+                        X[i][0] = 1.0;
+                        X[i][1] = alignedData.valuesA[i];
+                        X[i][2] = alignedData.valuesB[i];
+                        Y1[i] = alignedData.valuesA[i + 1];
+                        Y2[i] = alignedData.valuesB[i + 1];
+                    }
+
+                    // OLS
+                    double[] beta1 = solveOLS(X, Y1);
+                    double[] beta2 = solveOLS(X, Y2);
+
+                    double[][] B = {
+                            {beta1[1], beta1[2]},
+                            {beta2[1], beta2[2]}
+                    };
+
+                    // Residuen
+                    double[] residuals1 = new double[numObs];
+                    double[] residuals2 = new double[numObs];
+                    for (int i = 0; i < numObs; i++) {
+                        double predicted1 = X[i][0] * beta1[0] + X[i][1] * beta1[1] + X[i][2] * beta1[2];
+                        double predicted2 = X[i][0] * beta2[0] + X[i][1] * beta2[1] + X[i][2] * beta2[2];
+                        residuals1[i] = Y1[i] - predicted1;
+                        residuals2[i] = Y2[i] - predicted2;
+                    }
+
+                    double[][] sigma = computeCovarianceMatrix(residuals1, residuals2);
+                    double[][] P;
+                    try {
+                        P = cholesky(sigma);
+                    } catch (Exception ex) {
+                        // not positive definite -> try small regularization
+                        sigma[0][0] += 1e-9;
+                        sigma[1][1] += 1e-9;
+                        P = cholesky(sigma);
+                    }
+
+                    // IRF computation (h=0..steps)
+                    List<Double> respA = new ArrayList<>();
+                    List<Double> respB = new ArrayList<>();
+                    double[][] B_power_h = identity(2);
+
+                    for (int h = 0; h <= hSteps; h++) {
+                        if (h > 0) {
+                            B_power_h = multiply(B, B_power_h);
+                        }
+                        double[][] responseMatrix = multiply(B_power_h, P); // 2x2
+                        // effect of shock in variable A is first column
+                        respA.add(responseMatrix[0][0]);
+                        respB.add(responseMatrix[1][0]);
+                    }
+
+                    results.add(new IRFNodeResult(nodeB, respA, respB));
+
+                } catch (Exception e) {
+                    log.warn("Error processing nodeB " + (nodeB == null ? "null" : nodeB.getElementId()) + ": " + e.getMessage());
+                }
+            }
+
+            return results.stream();
+
+        } catch (Exception e) {
+            log.error("Unexpected error in VAR_IRF_node_group: " + e.getMessage());
+            return Stream.empty();
+        }
+    }
+
+    // ----------------------
+    // Helpers (reused / adapted)
+    // ----------------------
+
+    // combine series to epoch millis map (like earlier, non-stream variant to avoid lambda capture issues)
+    /*private static Map<Long, Double> combineSeriesToMillisMap(List<TimeSeriesResult> seriesList, String preferredMetricKey) {
+        Map<Long, Double> map = new HashMap<>();
+        if (seriesList == null) return map;
+
+        for (TimeSeriesResult ts : seriesList) {
+            if (ts == null || ts.timestamps == null) continue;
+
+            for (int i = 0; i < ts.timestamps.size(); i++) {
+                try {
+                    ZonedDateTime zdt = TimeSeriesUtil.parseToZonedDateTime(ts.timestamps.get(i));
+                    long epochMillis = zdt.toInstant().toEpochMilli();
+
+                    Double v = null;
+                    if (ts.values != null) {
+                        if (ts.values.containsKey(preferredMetricKey)) {
+                            List<Double> list = ts.values.get(preferredMetricKey);
+                            if (list != null && list.size() > i) v = list.get(i);
+                        } else {
+                            // fallback: first series that has index i
+                            for (List<Double> list : ts.values.values()) {
+                                if (list != null && list.size() > i) {
+                                    v = list.get(i);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (v != null && !v.isNaN() && !v.isInfinite()) map.put(epochMillis, v);
+                } catch (Exception ignored) {
+                    // skip bad timestamp / index issues
+                }
+            }
+        }
+        return map;
+    }
+
+    // linear interpolation routine used by correlation procedure
+    private static Double interpolateAt(long[] xs, double[] ys, long t) {
+        if (xs == null || xs.length == 0) return null;
+        if (t < xs[0] || t > xs[xs.length - 1]) return null;
+        int idx = Arrays.binarySearch(xs, t);
+        if (idx >= 0) return ys[idx];
+        int ins = -idx - 1;
+        if (ins == 0 || ins >= xs.length) return null;
+        int left = ins - 1;
+        int right = ins;
+        long x0 = xs[left];
+        long x1 = xs[right];
+        double y0 = ys[left];
+        double y1 = ys[right];
+        if (x1 == x0) return y0;
+        double ratio = (double) (t - x0) / (double) (x1 - x0);
+        return y0 + ratio * (y1 - y0);
+    }*/
+
+    // OLS & linear algebra helpers (copied/adapted from your VARImpulseResponse_II)
+    private double[] solveOLS(double[][] X, double[] y) {
+        double[][] Xt = transpose(X);
+        double[][] XtX = multiply(Xt, X);
+        double[][] XtX_inv = inverse(XtX);
+        if (XtX_inv == null) throw new IllegalStateException("Matrix X'X is singular.");
+        double[] Xty = multiply(Xt, y);
+        return multiply(XtX_inv, Xty);
+    }
+
+    private double[][] transpose(double[][] matrix) {
+        int rows = matrix.length, cols = matrix[0].length;
+        double[][] transposed = new double[cols][rows];
+        for (int i = 0; i < rows; i++) for (int j = 0; j < cols; j++) transposed[j][i] = matrix[i][j];
+        return transposed;
+    }
+
+    private double[][] multiply(double[][] A, double[][] B) {
+        int aRows = A.length, aCols = A[0].length, bRows = B.length, bCols = B[0].length;
+        if (aCols != bRows) throw new IllegalArgumentException("Matrix dimensions incompatible.");
+        double[][] result = new double[aRows][bCols];
+        for (int i = 0; i < aRows; i++) for (int j = 0; j < bCols; j++)
+            for (int k = 0; k < aCols; k++) result[i][j] += A[i][k] * B[k][j];
+        return result;
+    }
+
+    private double[] multiply(double[][] A, double[] x) {
+        int rows = A.length, cols = A[0].length;
+        if (cols != x.length) throw new IllegalArgumentException("Matrix- and vector-dimensions incompatible.");
+        double[] result = new double[rows];
+        for (int i = 0; i < rows; i++) for (int j = 0; j < cols; j++) result[i] += A[i][j] * x[j];
+        return result;
+    }
+
+    private double[][] identity(int size) {
+        double[][] id = new double[size][size];
+        for (int i = 0; i < size; i++) id[i][i] = 1.0;
+        return id;
+    }
+
+    private double[][] inverse(double[][] m) {
+        if (m.length != 3 || m[0].length != 3) throw new IllegalArgumentException("Inverse only implemented for 3x3.");
+        double det = m[0][0]*(m[1][1]*m[2][2]-m[2][1]*m[1][2]) - m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0]) + m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0]);
+        if (Math.abs(det)<1e-12) return null;
+        double invDet = 1.0/det;
+        double[][] inv = new double[3][3];
+        inv[0][0] = (m[1][1]*m[2][2]-m[2][1]*m[1][2])*invDet;
+        inv[0][1] = (m[0][2]*m[2][1]-m[0][1]*m[2][2])*invDet;
+        inv[0][2] = (m[0][1]*m[1][2]-m[0][2]*m[1][1])*invDet;
+        inv[1][0] = (m[1][2]*m[2][0]-m[1][0]*m[2][2])*invDet;
+        inv[1][1] = (m[0][0]*m[2][2]-m[0][2]*m[2][0])*invDet;
+        inv[1][2] = (m[1][0]*m[0][2]-m[0][0]*m[1][2])*invDet;
+        inv[2][0] = (m[1][0]*m[2][1]-m[2][0]*m[1][1])*invDet;
+        inv[2][1] = (m[2][0]*m[0][1]-m[0][0]*m[2][1])*invDet;
+        inv[2][2] = (m[0][0]*m[1][1]-m[1][0]*m[0][1])*invDet;
+        return inv;
+    }
+
+    private double[][] computeCovarianceMatrix(double[] res1, double[] res2) {
+        int n = res1.length;
+        double var1=0, var2=0, cov=0;
+        for (int i=0;i<n;i++){ var1+=res1[i]*res1[i]; var2+=res2[i]*res2[i]; cov+=res1[i]*res2[i];}
+        double df = n-1.0; var1/=df; var2/=df; cov/=df;
+        return new double[][]{{var1,cov},{cov,var2}};
+    }
+
+    private double[][] cholesky(double[][] A) {
+        if (A.length!=2 || A[0].length!=2) throw new IllegalArgumentException("Cholesky only for 2x2");
+        double[][] L = new double[2][2];
+        if (A[0][0]<=0 || A[1][1]-A[1][0]*A[1][0]<=0) throw new ArithmeticException("Matrix not positive definite");
+        L[0][0]=Math.sqrt(A[0][0]); L[0][1]=0;
+        L[1][0]=A[1][0]/L[0][0]; L[1][1]=Math.sqrt(A[1][1]-L[1][0]*L[1][0]);
+        return L;
+    }
+}
