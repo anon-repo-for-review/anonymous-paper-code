@@ -1,0 +1,18 @@
+# values-grafana-neo4j.yaml
+# Helm values for OpenTelemetry Demo with Neo4j/GraphObs Grafana integration
+#
+# Usage:
+#   1. Apply the ConfigMaps:
+#      kubectl apply -f grafana-neo4j-datasource.yaml
+#      kubectl apply -f grafana-dashboard-configmap.yaml
+#
+#   2. Install OTel Demo with these values:
+#      helm install otel-demo open-telemetry/opentelemetry-demo -f values-grafana-neo4j.yaml
+#
+#   3. Apply the GraphObs deployment:
+#      kubectl apply -f graphobs.yaml
+
+grafana:
+  plugins:
+    - grafana-opensearch-datasource
+    - kniepdennis-neo4j-datasource

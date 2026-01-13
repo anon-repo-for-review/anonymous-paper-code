@@ -1,0 +1,310 @@
+# grafana-dashboard-configmap.yaml
+# ConfigMap containing the GraphObs dashboard for Grafana
+#
+# Apply BEFORE helm install:
+#   kubectl apply -f grafana-dashboard-configmap.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-graphobs
+  namespace: default
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "GraphObs"
+data:
+  graphobs-checkout-dependencies.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "datasource": {
+            "type": "kniepdennis-neo4j-datasource",
+            "uid": "neo4j-graphobs"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "CPU Usage (seconds)",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 20,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "id": 1,
+          "options": {
+            "legend": {
+              "calcs": ["mean", "max", "min"],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "title": "Checkout Dependencies - CPU Usage (excluding Shipping subsystem)",
+          "type": "timeseries",
+          "targets": [
+            {
+              "datasource": {
+                "type": "kniepdennis-neo4j-datasource",
+                "uid": "neo4j-graphobs"
+              },
+              "cypherQuery": "MATCH (root:Service {name: 'checkout'})-[:HAS_OPERATION]->()-[:DEPENDS_ON*]->( )<-[:HAS_OPERATION]-(dependency:Service)-[]-(pods:Pod)\nWHERE NOT (dependency.name = 'shipping' OR (dependency)-[:HAS_OPERATION]->()<-[:DEPENDS_ON*]-()<-[:HAS_OPERATION]-(:Service {name: 'shipping'}))\n\nWITH collect(DISTINCT pods) AS dynamicSubsystem\nCALL graphobs.aggregation.aggregate_nodes(\n    dynamicSubsystem, \n    \"container_cpu_usage_seconds_total\", \n    {\n        aggregation : \"difference\", \n        range: \"-10h\",\n        time: toString(datetime())\n    }\n) YIELD timestamps, values\n\nUNWIND range(0, size(timestamps)-1) AS index\nRETURN datetime(timestamps[index]) AS time, values.container_cpu_usage_seconds_total[index] AS number\nORDER BY time",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "kniepdennis-neo4j-datasource",
+            "uid": "neo4j-graphobs"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 12
+          },
+          "id": 2,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": ["lastNotNull"],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "title": "Services Count",
+          "type": "stat",
+          "targets": [
+            {
+              "datasource": {
+                "type": "kniepdennis-neo4j-datasource",
+                "uid": "neo4j-graphobs"
+              },
+              "cypherQuery": "MATCH (s:Service) RETURN count(s) AS count",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "kniepdennis-neo4j-datasource",
+            "uid": "neo4j-graphobs"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 12
+          },
+          "id": 3,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": ["lastNotNull"],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "title": "Pods Count",
+          "type": "stat",
+          "targets": [
+            {
+              "datasource": {
+                "type": "kniepdennis-neo4j-datasource",
+                "uid": "neo4j-graphobs"
+              },
+              "cypherQuery": "MATCH (p:Pod) RETURN count(p) AS count",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "kniepdennis-neo4j-datasource",
+            "uid": "neo4j-graphobs"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 20
+          },
+          "id": 4,
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true,
+              "values": ["value"]
+            },
+            "pieType": "pie",
+            "reduceOptions": {
+              "calcs": ["lastNotNull"],
+              "fields": "",
+              "values": false
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "title": "Operations per Service",
+          "type": "piechart",
+          "targets": [
+            {
+              "datasource": {
+                "type": "kniepdennis-neo4j-datasource",
+                "uid": "neo4j-graphobs"
+              },
+              "cypherQuery": "MATCH (s:Service)-[:HAS_OPERATION]->(o:Operation)\nRETURN s.name AS service, count(o) AS operations\nORDER BY operations DESC",
+              "refId": "A"
+            }
+          ]
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 39,
+      "tags": ["graphobs", "neo4j", "observability"],
+      "templating": {
+        "list": []
+      },
+      "time": {
+        "from": "now-12h",
+        "to": "now"
+      },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "GraphObs - Checkout Dependencies",
+      "uid": "graphobs-checkout",
+      "version": 1,
+      "weekStart": ""
+    }

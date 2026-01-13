@@ -1,0 +1,106 @@
+# ============================================================
+# graphobs Neo4j Extension for OpenTelemetry Demo
+# ============================================================
+# Append this to the end of:
+# https://github.com/open-telemetry/opentelemetry-demo/blob/main/kubernetes/opentelemetry-demo.yaml
+#
+# Or apply separately after the OTel Demo:
+#   kubectl apply -f graphobs-extension.yaml -n otel-demo
+# ============================================================
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graphobs
+  namespace: default
+  labels:
+    app.kubernetes.io/component: graphobs
+    app.kubernetes.io/instance: otel-demo
+    app.kubernetes.io/name: otel-demo-graphobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: graphobs
+      app.kubernetes.io/instance: otel-demo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: graphobs
+        app.kubernetes.io/instance: otel-demo
+        app.kubernetes.io/name: otel-demo-graphobs
+    spec:
+      containers:
+        - name: neo4j
+          image: graph174/graphobs-neo4j:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 7474
+              name: http
+              protocol: TCP
+            - containerPort: 7687
+              name: bolt
+              protocol: TCP
+          env:
+            - name: NEO4J_AUTH
+              value: "neo4j/graphobs123"
+            - name: NEO4J_dbms_security_procedures_unrestricted
+              value: "*"
+            - name: NEO4J_dbms_security_procedures_allowlist
+              value: "*"
+            # OTel Demo Service URLs (no Helm prefix)
+            - name: PROMETHEUS_URL
+              value: "http://prometheus:9090"
+            - name: JAEGER_URL
+              value: "http://jaeger-query:16686"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 7474
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 7474
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: graphobs
+  namespace: default
+  labels:
+    app.kubernetes.io/component: graphobs
+    app.kubernetes.io/instance: otel-demo
+    app.kubernetes.io/name: otel-demo-graphobs
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 7474
+      targetPort: 7474
+      protocol: TCP
+    - name: bolt
+      port: 7687
+      targetPort: 7687
+      protocol: TCP
+  selector:
+    app.kubernetes.io/component: graphobs
+    app.kubernetes.io/instance: otel-demo

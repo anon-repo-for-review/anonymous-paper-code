@@ -1,0 +1,26 @@
+# grafana-neo4j-datasource.yaml
+# Neo4j datasource for Grafana (auto-discovered by sidecar)
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasource-neo4j
+  namespace: default
+  labels:
+    grafana_datasource: "1"
+data:
+  neo4j-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Neo4j-GraphObs
+        uid: neo4j-graphobs
+        type: kniepdennis-neo4j-datasource
+        access: proxy
+        isDefault: false
+        editable: true
+        jsonData:
+          url: neo4j://graphobs:7687
+          database: neo4j
+          username: neo4j
+        secureJsonData:
+          password: graphobs123
